@@ -1,0 +1,25 @@
+# System & Environment
+.DS_Store
+.env
+__pycache__/
+*.pyc
+node_modules/
+package-lock.json
+dist/
+coverage/
+
+# IDEs
+.vscode/
+.idea/
+
+# Secure Data / Persistence
+/secure/
+!/secure/uploads/.gitkeep
+
+# Worker
+worker/celerybeat-schedule
+worker/celerybeat.pid
+
+# Temp
+*.log
+*.tmp

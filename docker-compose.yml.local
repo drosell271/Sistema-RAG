@@ -1,0 +1,275 @@
+# =====================================================================
+# Docker Compose — Modo Local (sin Swarm)
+# =====================================================================
+# Uso:
+#   docker compose -f docker-compose.yml.local up --build -d
+#   docker compose -f docker-compose.yml.local logs -f
+#   docker compose -f docker-compose.yml.local down
+# =====================================================================
+
+services:
+  # ==================== Infraestructura ====================
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT_ALLOW_RECOVERY_MODE=${QDRANT_ALLOW_RECOVERY_MODE}
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+      - QDRANT__TELEMETRY_DISABLED=${QDRANT_TELEMETRY_DISABLED}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rag_net
+
+  redis:
+    image: redis:alpine
+    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD}"'
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - rag_net
+
+  mongo:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - rag_net
+
+  # ==================== Aplicación ====================
+  frontend:
+    image: rag_frontend:local
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api/v1
+        VITE_MAX_CONCURRENCY: ${INGESTION_CONCURRENCY}
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    networks:
+      - rag_net
+    depends_on:
+      backend:
+        condition: service_started
+
+  backend:
+    image: rag_backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - PORT=${PORT}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN}
+      - BCRYPT_ROUNDS=${BCRYPT_ROUNDS}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_DOMAIN=${ADMIN_DOMAIN}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - APP_NAME=${APP_NAME}
+      - THEME_COLOR=${THEME_COLOR}
+      - APP_LOGO_URL=${APP_LOGO_URL}
+      - MONGO_HOST=mongo
+      - MONGO_PORT=27017
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_SIZE=${EMBEDDING_SIZE}
+      - DOCS_DIR=${DOCS_DIR}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB}
+      - DOC_CHUNK_SIZE=${DOC_CHUNK_SIZE}
+      - DOC_CHUNK_OVERLAP=${DOC_CHUNK_OVERLAP}
+      - PST_CHUNK_SIZE=${PST_CHUNK_SIZE}
+      - PST_CHUNK_OVERLAP=${PST_CHUNK_OVERLAP}
+      - SEARCH_LIMIT=${SEARCH_LIMIT}
+      - SEARCH_THRESHOLD=${SEARCH_THRESHOLD}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_SECURE=${SMTP_SECURE}
+      - EMAIL_FROM=${EMAIL_FROM}
+      - IMAP_HOST=${IMAP_HOST}
+      - IMAP_PORT=${IMAP_PORT}
+      - IMAP_USER=${IMAP_USER}
+      - IMAP_PASSWORD=${IMAP_PASSWORD}
+      - IGNORED_EMAIL_SENDERS=${IGNORED_EMAIL_SENDERS}
+      - VITE_API_URL=${VITE_API_URL}
+    volumes:
+      - ${LOCAL_UPLOADS_PATH:-./secure/uploads}:/app/uploads
+    restart: unless-stopped
+    networks:
+      - rag_net
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ==================== Workers ====================
+  worker-ingestion:
+    image: rag_worker:local
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker -B --loglevel=info --concurrency=${INGESTION_CONCURRENCY} -Q ingestion,celery
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - MONGO_HOST=mongo
+      - MONGO_PORT=27017
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_SIZE=${EMBEDDING_SIZE}
+      - SPARSE_EMBEDDING_MODEL=${SPARSE_EMBEDDING_MODEL}
+      - RERANKER_MODEL=${RERANKER_MODEL}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS}
+      - DOCS_DIR=${DOCS_DIR}
+      - DOC_CHUNK_SIZE=${DOC_CHUNK_SIZE}
+      - DOC_CHUNK_OVERLAP=${DOC_CHUNK_OVERLAP}
+      - INGESTION_CONCURRENCY=${INGESTION_CONCURRENCY}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - EMAIL_FROM=${EMAIL_FROM}
+      - IMAP_HOST=${IMAP_HOST}
+      - IMAP_PORT=${IMAP_PORT}
+      - IMAP_USER=${IMAP_USER}
+      - IMAP_PASSWORD=${IMAP_PASSWORD}
+      - IMAP_POLL_INTERVAL=${IMAP_POLL_INTERVAL}
+      - IGNORED_EMAIL_SENDERS=${IGNORED_EMAIL_SENDERS}
+    volumes:
+      - ${LOCAL_UPLOADS_PATH:-./secure/uploads}:/app/uploads
+      - huggingface_cache:/root/.cache/huggingface
+    restart: unless-stopped
+    networks:
+      - rag_net
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  worker-search:
+    image: rag_worker:local
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker --loglevel=info --concurrency=${INGESTION_CONCURRENCY} -Q search,celery
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - MONGO_HOST=mongo
+      - MONGO_PORT=27017
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_SIZE=${EMBEDDING_SIZE}
+      - SPARSE_EMBEDDING_MODEL=${SPARSE_EMBEDDING_MODEL}
+      - RERANKER_MODEL=${RERANKER_MODEL}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS}
+      - DOCS_DIR=${DOCS_DIR}
+      - DOC_CHUNK_SIZE=${DOC_CHUNK_SIZE}
+      - DOC_CHUNK_OVERLAP=${DOC_CHUNK_OVERLAP}
+      - INGESTION_CONCURRENCY=${INGESTION_CONCURRENCY}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - EMAIL_FROM=${EMAIL_FROM}
+      - IMAP_HOST=${IMAP_HOST}
+      - IMAP_PORT=${IMAP_PORT}
+      - IMAP_USER=${IMAP_USER}
+      - IMAP_PASSWORD=${IMAP_PASSWORD}
+      - IMAP_POLL_INTERVAL=${IMAP_POLL_INTERVAL}
+      - IGNORED_EMAIL_SENDERS=${IGNORED_EMAIL_SENDERS}
+    volumes:
+      - ${LOCAL_UPLOADS_PATH:-./secure/uploads}:/app/uploads
+      - huggingface_cache:/root/.cache/huggingface
+    restart: unless-stopped
+    networks:
+      - rag_net
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+networks:
+  rag_net:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+  mongo_data:
+  huggingface_cache:

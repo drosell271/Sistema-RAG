@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@theme {
+	--color-primary: var(--color-primary);
+	--color-primary-50: color-mix(in srgb, var(--color-primary), white 90%);
+	--color-primary-100: color-mix(in srgb, var(--color-primary), white 80%);
+	--color-primary-200: color-mix(in srgb, var(--color-primary), white 60%);
+	--color-primary-300: color-mix(in srgb, var(--color-primary), white 40%);
+	--color-primary-400: color-mix(in srgb, var(--color-primary), white 20%);
+	--color-primary-500: var(--color-primary);
+	--color-primary-600: color-mix(in srgb, var(--color-primary), black 10%);
+	--color-primary-700: color-mix(in srgb, var(--color-primary), black 20%);
+	--color-primary-800: color-mix(in srgb, var(--color-primary), black 30%);
+	--color-primary-900: color-mix(in srgb, var(--color-primary), black 40%);
+}
+
+@variant dark (&:where(.dark, .dark *));

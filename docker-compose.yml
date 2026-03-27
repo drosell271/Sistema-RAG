@@ -1,0 +1,230 @@
+services:
+  # ==================== Infra Services ====================
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == infra
+    networks:
+      rag_net:
+        aliases:
+          - qdrant
+    environment:
+      - QDRANT_ALLOW_RECOVERY_MODE=${QDRANT_ALLOW_RECOVERY_MODE}
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+      - QDRANT__TELEMETRY_DISABLED=${QDRANT_TELEMETRY_DISABLED}
+
+  redis:
+    image: redis:alpine
+    command: sh -c 'redis-server --requirepass "$${REDIS_PASSWORD}"'
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == infra
+    networks:
+      rag_net:
+        aliases:
+          - redis
+
+  mongo:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == infra
+    networks:
+      rag_net:
+        aliases:
+          - mongo
+
+  frontend:
+    image: rag_frontend:latest
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api/v1
+        VITE_MAX_CONCURRENCY: ${INGESTION_CONCURRENCY}
+    ports:
+      - "80:80"
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == infra
+    networks:
+      - rag_net
+    depends_on:
+      - backend
+
+  backend:
+    image: rag_backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - PORT=${PORT}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - BCRYPT_ROUNDS=${BCRYPT_ROUNDS}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_DOMAIN=${ADMIN_DOMAIN}
+      - MONGO_HOST=${MONGO_HOST}
+      - MONGO_PORT=${MONGO_PORT}
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - QDRANT_HOST=${QDRANT_HOST}
+      - QDRANT_PORT=${QDRANT_PORT}
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_SIZE=${EMBEDDING_SIZE}
+      - DOCS_DIR=${DOCS_DIR}
+      - VITE_API_URL=${VITE_API_URL}
+    volumes:
+      - ${UPLOADS_HOST_PATH:-/app/secure/uploads}:/app/uploads
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == infra
+    networks:
+      rag_net:
+        aliases:
+          - backend
+    depends_on:
+      - qdrant
+      - mongo
+      - redis
+
+  # ==================== Workers ====================
+
+  # Worker Ingestion
+  worker-ingestion:
+    image: rag_worker:latest
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker -B --loglevel=info --concurrency=${INGESTION_CONCURRENCY} -Q ingestion,celery
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - MONGO_HOST=${MONGO_HOST}
+      - MONGO_PORT=${MONGO_PORT}
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - QDRANT_HOST=${QDRANT_HOST}
+      - QDRANT_PORT=${QDRANT_PORT}
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_SIZE=${EMBEDDING_SIZE}
+      - SPARSE_EMBEDDING_MODEL=${SPARSE_EMBEDDING_MODEL}
+      - RERANKER_MODEL=${RERANKER_MODEL}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS}
+      - DOCS_DIR=${DOCS_DIR}
+      - INGESTION_CONCURRENCY=${INGESTION_CONCURRENCY}
+      - IMAP_POLL_INTERVAL=${IMAP_POLL_INTERVAL}
+    volumes:
+      - ${UPLOADS_HOST_PATH:-/app/secure/uploads}:/app/uploads
+      - huggingface_cache:/root/.cache/huggingface
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${INGESTION_NODE_HOSTNAME:-swarm-worker-ingestion}
+      resources:
+        limits:
+          memory: 24G
+    networks:
+      - rag_net
+    depends_on:
+      - redis
+      - qdrant
+      - mongo
+
+  # Worker Search
+  worker-search:
+    image: rag_worker:latest
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker --loglevel=info --concurrency=${INGESTION_CONCURRENCY} -Q search,celery
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - MONGO_HOST=${MONGO_HOST}
+      - MONGO_PORT=${MONGO_PORT}
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - QDRANT_HOST=${QDRANT_HOST}
+      - QDRANT_PORT=${QDRANT_PORT}
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_SIZE=${EMBEDDING_SIZE}
+      - SPARSE_EMBEDDING_MODEL=${SPARSE_EMBEDDING_MODEL}
+      - RERANKER_MODEL=${RERANKER_MODEL}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS}
+      - DOCS_DIR=${DOCS_DIR}
+      - INGESTION_CONCURRENCY=${INGESTION_CONCURRENCY}
+    volumes:
+      - ${UPLOADS_HOST_PATH:-/app/secure/uploads}:/app/uploads
+      - huggingface_cache:/root/.cache/huggingface
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${SEARCH_NODE_HOSTNAME:-swarm-worker-search}
+      resources:
+        limits:
+          memory: 24G
+    networks:
+      - rag_net
+    depends_on:
+      - redis
+      - qdrant
+      - mongo
+
+networks:
+  rag_net:
+    driver: overlay
+    attachable: true
+
+volumes:
+  qdrant_storage:
+  mongo_data:
+  huggingface_cache:

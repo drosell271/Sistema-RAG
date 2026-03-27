@@ -1,0 +1,16 @@
+celery[redis]
+motor
+pymongo
+qdrant-client
+sentence-transformers
+python-dotenv
+requests
+torch
+numpy
+PyMuPDF
+beautifulsoup4
+extract-msg
+libpff-python
+fastembed
+langdetect
+deep-translator
